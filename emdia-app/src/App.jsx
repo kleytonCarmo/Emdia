@@ -1,23 +1,33 @@
-import { useState, useMemo } from "react";
+import { useState, useMemo, useEffect } from "react";
+import { supabase } from "./supabase";
+import Auth from "./Auth";
 
-/* ---------- persistência local (troque por Supabase depois) ---------- */
-function usePersisted(key, initial) {
-  const [v, setV] = useState(() => {
-    try {
-      const raw = localStorage.getItem(key);
-      return raw !== null ? JSON.parse(raw) : initial;
-    } catch {
-      return initial;
-    }
-  });
-  const set = (nv) =>
-    setV((prev) => {
-      const next = typeof nv === "function" ? nv(prev) : nv;
-      try { localStorage.setItem(key, JSON.stringify(next)); } catch {}
-      return next;
-    });
-  return [v, set];
-}
+/* ============================================================
+   Camada de dados — Supabase (nuvem, multiusuário)
+   Cada trainer só enxerga os próprios dados (Row Level Security).
+   ============================================================ */
+
+/* converte snake_case do banco -> camelCase do app */
+const fromDbClient = (r) => ({
+  id: r.id, nome: r.nome, tipo: r.tipo, plano: r.plano, ciclo: r.ciclo,
+  cobrancaAuto: r.cobranca_auto, valor: r.valor ? Number(r.valor) : undefined,
+  diaVenc: r.dia_venc, valorSessao: r.valor_sessao ? Number(r.valor_sessao) : undefined,
+  saldo: r.saldo, projetoNome: r.projeto_nome,
+  projetoValor: r.projeto_valor ? Number(r.projeto_valor) : undefined,
+  whatsapp: r.whatsapp, ativo: r.ativo,
+});
+const toDbClient = (c, userId) => ({
+  user_id: userId, nome: c.nome, tipo: c.tipo, plano: c.plano, ciclo: c.ciclo ?? 1,
+  cobranca_auto: !!c.cobrancaAuto, valor: c.valor ?? null, dia_venc: c.diaVenc ?? null,
+  valor_sessao: c.valorSessao ?? null, saldo: c.saldo ?? 0,
+  projeto_nome: c.projetoNome ?? null, projeto_valor: c.projetoValor ?? null,
+  whatsapp: c.whatsapp ?? null, ativo: c.ativo ?? true,
+});
+const fromDbPayment = (r) => ({
+  id: r.id, clientId: r.client_id, valor: Number(r.valor), data: r.data,
+  tipo: r.tipo, ref: r.ref, meses: r.meses, creditos: r.creditos,
+});
+const fromDbSession = (r) => ({ id: r.id, clientId: r.client_id, data: r.data, tipo: r.tipo });
 
 /* ============================================================
    EmDia v2 — Gestão de pagamentos e sessões para personal trainers
@@ -98,29 +108,6 @@ function fallbackCopy(text) {
   document.body.removeChild(ta);
 }
 
-/* ---------- dados demo ---------- */
-const seedClients = [
-  { id: 1, nome: "Ana Beatriz", tipo: "individual", plano: "mensal", valor: 450, diaVenc: 5, whatsapp: "5511999990001", ativo: true },
-  { id: 2, nome: "Carlos Mendes", tipo: "individual", plano: "mensal", valor: 380, diaVenc: Math.min(28, new Date().getDate() + 5), whatsapp: "5511999990002", ativo: true },
-  { id: 3, nome: "Fernanda Lima", tipo: "individual", plano: "creditos", valorSessao: 90, saldo: 2, whatsapp: "5511999990003", ativo: true },
-  { id: 4, nome: "João Pedro", tipo: "individual", plano: "creditos", valorSessao: 90, saldo: 8, whatsapp: "5511999990004", ativo: true },
-  { id: 5, nome: "Mariana Costa", tipo: "individual", plano: "projeto", projetoNome: "Prep. maratona", projetoValor: 3000, whatsapp: "5511999990005", ativo: true },
-  { id: 6, nome: "Paula & Renato", tipo: "dupla", plano: "mensal", valor: 700, diaVenc: new Date().getDate(), whatsapp: "5511999990006", ativo: true },
-  { id: 7, nome: "Diego Martins", tipo: "individual", plano: "mensal", ciclo: 6, valor: 2400, diaVenc: 10, cobrancaAuto: true, whatsapp: "5511999990007", ativo: true },
-];
-const d = (offset) => new Date(today.getFullYear(), today.getMonth(), today.getDate() + offset).toISOString();
-const seedPayments = [
-  { id: 1, clientId: 1, valor: 450, data: d(-3), tipo: "mensalidade", ref: ym },
-  { id: 2, clientId: 4, valor: 900, data: d(-6), tipo: "pacote", creditos: 10 },
-  { id: 3, clientId: 5, valor: 1500, data: d(-12), tipo: "projeto" },
-  { id: 4, clientId: 7, valor: 2400, data: d(-20), tipo: "mensalidade", ref: ymOf(new Date(today.getFullYear(), today.getMonth() - 1, 1)), meses: 6 },
-];
-const seedSessions = [
-  { id: 1, clientId: 4, data: d(-2), tipo: "plano" },
-  { id: 2, clientId: 3, data: d(-1), tipo: "plano" },
-  { id: 3, clientId: 2, data: d(-4), tipo: "experimental" },
-];
-
 /* ---------- status ---------- */
 function coveredMonths(c, payments) {
   const s = new Set();
@@ -167,12 +154,54 @@ function waCobranca(c, s) {
 }
 
 /* ============================================================ APP */
-export default function App() {
-  const [clients, setClients] = usePersisted("emdia:clients", seedClients);
-  const [payments, setPayments] = usePersisted("emdia:payments", seedPayments);
-  const [sessions, setSessions] = usePersisted("emdia:sessions", seedSessions);
-  const [pixCfg, setPixCfg] = usePersisted("emdia:pix", { chave: "", nome: "", cidade: "", descontoAntecipado: 10, linkCartao: "" });
-  const [remindersSent, setRemindersSent] = usePersisted("emdia:reminders", {});
+/* ---------- porteiro: mostra login se não estiver autenticado ---------- */
+export default function Root() {
+  const [session, setSession] = useState(undefined);
+
+  useEffect(() => {
+    supabase.auth.getSession().then(({ data }) => setSession(data.session));
+    const { data: sub } = supabase.auth.onAuthStateChange((_e, s) => setSession(s));
+    return () => sub.subscription.unsubscribe();
+  }, []);
+
+  if (session === undefined)
+    return (
+      <div className="min-h-screen flex items-center justify-center" style={{ background: T.bg }}>
+        <p className="text-sm font-semibold" style={{ color: T.inkSoft }}>Carregando…</p>
+      </div>
+    );
+  if (!session) return <Auth />;
+  return <App user={session.user} />;
+}
+
+function App({ user }) {
+  const [clients, setClients] = useState([]);
+  const [payments, setPayments] = useState([]);
+  const [sessions, setSessions] = useState([]);
+  const [pixCfg, setPixCfg] = useState({ chave: "", nome: "", cidade: "", descontoAntecipado: 10, linkCartao: "" });
+  const [remindersSent, setRemindersSent] = useState({});
+  const [carregando, setCarregando] = useState(true);
+
+  /* ---- carrega tudo do banco ---- */
+  useEffect(() => {
+    (async () => {
+      const [c, p, s, cfg] = await Promise.all([
+        supabase.from("clients").select("*").order("nome"),
+        supabase.from("payments").select("*"),
+        supabase.from("sessions").select("*"),
+        supabase.from("settings").select("*").eq("user_id", user.id).maybeSingle(),
+      ]);
+      if (c.data) setClients(c.data.map(fromDbClient));
+      if (p.data) setPayments(p.data.map(fromDbPayment));
+      if (s.data) setSessions(s.data.map(fromDbSession));
+      if (cfg.data)
+        setPixCfg({
+          chave: cfg.data.chave || "", nome: cfg.data.nome || "", cidade: cfg.data.cidade || "",
+          descontoAntecipado: cfg.data.desconto_antecipado ?? 10, linkCartao: cfg.data.link_cartao || "",
+        });
+      setCarregando(false);
+    })();
+  }, [user.id]);
   const [tab, setTab] = useState("painel");
   const [query, setQuery] = useState("");
   const [histFilter, setHistFilter] = useState("tudo");
@@ -182,6 +211,7 @@ export default function App() {
   const ping = (m) => { setToast(m); setTimeout(() => setToast(null), 2200); };
 
   const ativos = clients.filter((c) => c.ativo);
+  const semAlunos = !carregando && clients.length === 0;
 
   /* ---- métricas ---- */
   const stats = useMemo(() => {
@@ -246,25 +276,68 @@ export default function App() {
     return `https://wa.me/${c.whatsapp}?text=${encodeURIComponent(msg)}`;
   };
 
-  /* ---- ações ---- */
-  const addPayment = (p) => { setPayments((ps) => [...ps, { ...p, id: Date.now() + Math.random() }]); };
-
-  const registrarSessao = (c, tipo, valorAvulsa) => {
-    setSessions((ss) => [...ss, { id: Date.now(), clientId: c.id, data: new Date().toISOString(), tipo }]);
-    if (tipo === "plano" && c.plano === "creditos") {
-      setClients((cs) => cs.map((x) => (x.id === c.id ? { ...x, saldo: (x.saldo || 0) - 1 } : x)));
-      ping(`Sessão registrada · saldo: ${(c.saldo || 0) - 1}`);
-    } else if (tipo === "avulsa") {
-      addPayment({ clientId: c.id, valor: valorAvulsa, data: new Date().toISOString(), tipo: "avulsa" });
-      ping(`Sessão avulsa registrada · ${brl(valorAvulsa)}`);
-    } else ping("Sessão experimental registrada");
-    setModal(null);
+  /* ---- ações (gravam no banco) ---- */
+  const addPayment = async (p) => {
+    const { data, error } = await supabase.from("payments").insert({
+      user_id: user.id, client_id: p.clientId, valor: p.valor, data: p.data,
+      tipo: p.tipo, ref: p.ref ?? null, meses: p.meses ?? 1, creditos: p.creditos ?? null,
+    }).select().single();
+    if (error) { ping("Erro ao salvar pagamento"); return; }
+    setPayments((ps) => [...ps, fromDbPayment(data)]);
   };
 
-  const saveClient = (data, editing) => {
-    if (editing) { setClients((cs) => cs.map((c) => (c.id === editing.id ? { ...c, ...data } : c))); ping("Aluno atualizado"); }
-    else { setClients((cs) => [...cs, { ...data, id: Date.now(), ativo: true, saldo: data.plano === "creditos" ? 0 : undefined }]); ping("Aluno adicionado"); }
+  const registrarSessao = async (c, tipo, valorAvulsa) => {
+    setModal(null);
+    const agora = new Date().toISOString();
+    const { data, error } = await supabase.from("sessions")
+      .insert({ user_id: user.id, client_id: c.id, data: agora, tipo }).select().single();
+    if (error) { ping("Erro ao registrar sessão"); return; }
+    setSessions((ss) => [...ss, fromDbSession(data)]);
+
+    if (tipo === "plano" && c.plano === "creditos") {
+      const novo = (c.saldo ?? 0) - 1;
+      await supabase.from("clients").update({ saldo: novo }).eq("id", c.id);
+      setClients((cs) => cs.map((x) => (x.id === c.id ? { ...x, saldo: novo } : x)));
+      ping(`Sessão registrada · saldo: ${novo}`);
+    } else if (tipo === "avulsa") {
+      await addPayment({ clientId: c.id, valor: valorAvulsa, data: agora, tipo: "avulsa" });
+      ping(`Sessão avulsa registrada · ${brl(valorAvulsa)}`);
+    } else ping("Sessão experimental registrada");
+  };
+
+  const saveClient = async (dados, editing) => {
     setModal(null); setSheet(null);
+    if (editing) {
+      const { error } = await supabase.from("clients")
+        .update(toDbClient({ ...editing, ...dados }, user.id)).eq("id", editing.id);
+      if (error) { ping("Erro ao salvar"); return; }
+      setClients((cs) => cs.map((c) => (c.id === editing.id ? { ...c, ...dados } : c)));
+      ping("Aluno atualizado");
+    } else {
+      const { data, error } = await supabase.from("clients")
+        .insert(toDbClient({ ...dados, ativo: true, saldo: 0 }, user.id)).select().single();
+      if (error) { ping("Erro ao adicionar aluno"); return; }
+      setClients((cs) => [...cs, fromDbClient(data)]);
+      ping("Aluno adicionado");
+    }
+  };
+
+  const toggleAtivo = async (c) => {
+    setSheet(null);
+    await supabase.from("clients").update({ ativo: !c.ativo }).eq("id", c.id);
+    setClients((cs) => cs.map((x) => (x.id === c.id ? { ...x, ativo: !x.ativo } : x)));
+    ping(c.ativo ? "Aluno pausado" : "Aluno reativado");
+  };
+
+  const saveCfg = async (novo) => {
+    setModal(null);
+    const { error } = await supabase.from("settings").upsert({
+      user_id: user.id, chave: novo.chave, nome: novo.nome, cidade: novo.cidade,
+      desconto_antecipado: novo.descontoAntecipado, link_cartao: novo.linkCartao,
+    });
+    if (error) { ping("Erro ao salvar"); return; }
+    setPixCfg(novo);
+    ping("Configurações salvas");
   };
 
   const clientById = (id) => clients.find((c) => c.id === id);
@@ -396,6 +469,19 @@ export default function App() {
               {/* alunos */}
               <div className="px-5 mt-5">
                 <h2 className="disp font-black text-sm uppercase tracking-wide mb-2" style={{ color: T.inkSoft }}>Alunos ativos</h2>
+                {carregando && <p className="text-sm text-center py-6" style={{ color: T.inkSoft }}>Carregando…</p>}
+                {semAlunos && (
+                  <div className="rounded-2xl p-5 text-center" style={{ background: T.card, border: `1px dashed ${T.line}` }}>
+                    <p className="font-semibold text-sm" style={{ color: T.ink }}>Comece cadastrando seu primeiro aluno</p>
+                    <p className="text-xs mt-1 mb-4" style={{ color: T.inkSoft }}>
+                      Leva 30 segundos. Depois é só um toque para cobrar com PIX pronto.
+                    </p>
+                    <button onClick={() => setModal({ type: "cliente" })}
+                      className="px-5 py-2.5 rounded-xl font-bold text-sm text-white" style={{ background: T.brand }}>
+                      + Adicionar aluno
+                    </button>
+                  </div>
+                )}
                 <div className="flex flex-col gap-2">
                   {ativos.map((c) => {
                     const s = statusOf(c, payments);
@@ -506,10 +592,7 @@ export default function App() {
               onSessao={() => setModal({ type: "sessao", client: sheetClient })}
               onPix={() => setModal({ type: "pix", client: sheetClient })}
               onEditar={() => setModal({ type: "cliente", client: sheetClient })}
-              onToggleAtivo={() => {
-                setClients((cs) => cs.map((x) => (x.id === sheetClient.id ? { ...x, ativo: !x.ativo } : x)));
-                setSheet(null); ping(sheetClient.ativo ? "Aluno pausado" : "Aluno reativado");
-              }}
+              onToggleAtivo={() => toggleAtivo(sheetClient)}
             />
           </Sheet>
         )}
@@ -523,13 +606,19 @@ export default function App() {
         {modal?.type === "pagamento" && (
           <Sheet onClose={() => setModal(null)}>
             <PaymentForm c={modal.client} payments={payments}
-              onSave={(list, msg) => {
-                list.forEach(addPayment);
-                if (modal.client.plano === "creditos") {
+              onSave={async (list, msg) => {
+                const alvo = modal.client;
+                setModal(null);
+                for (const p of list) await addPayment(p);
+                if (alvo.plano === "creditos") {
                   const cred = list.reduce((s, p) => s + (p.creditos || 0), 0);
-                  if (cred) setClients((cs) => cs.map((x) => (x.id === modal.client.id ? { ...x, saldo: (x.saldo || 0) + cred } : x)));
+                  if (cred) {
+                    const novo = (alvo.saldo ?? 0) + cred;
+                    await supabase.from("clients").update({ saldo: novo }).eq("id", alvo.id);
+                    setClients((cs) => cs.map((x) => (x.id === alvo.id ? { ...x, saldo: novo } : x)));
+                  }
                 }
-                ping(msg); setModal(null);
+                ping(msg);
               }}
               onCancel={() => setModal(null)} />
           </Sheet>
@@ -546,11 +635,8 @@ export default function App() {
         )}
         {modal?.type === "config" && (
           <Sheet onClose={() => setModal(null)}>
-            <PixConfig cfg={pixCfg} onSave={(c) => { setPixCfg(c); setModal(null); ping("Dados PIX salvos"); }} onCancel={() => setModal(null)}
-              onReset={() => {
-                setClients([]); setPayments([]); setSessions([]); setRemindersSent({});
-                setModal(null); ping("Dados apagados — app zerado");
-              }} />
+            <PixConfig cfg={pixCfg} email={user.email} onSave={saveCfg} onCancel={() => setModal(null)}
+              onLogout={() => supabase.auth.signOut()} />
           </Sheet>
         )}
 
@@ -973,13 +1059,12 @@ function PixForm({ c, cfg, onCopied, onClose }) {
 }
 
 /* ---- configuração PIX ---- */
-function PixConfig({ cfg, onSave, onCancel, onReset }) {
+function PixConfig({ cfg, email, onSave, onCancel, onLogout }) {
   const [chave, setChave] = useState(cfg.chave);
   const [nome, setNome] = useState(cfg.nome);
   const [cidade, setCidade] = useState(cfg.cidade);
   const [descontoAntecipado, setDesconto] = useState(String(cfg.descontoAntecipado ?? 0));
   const [linkCartao, setLinkCartao] = useState(cfg.linkCartao || "");
-  const [confirmReset, setConfirmReset] = useState(false);
   return (
     <>
       <h2 className="disp font-black text-xl mb-4" style={{ color: T.ink }}>Configurações</h2>
@@ -1005,14 +1090,14 @@ function PixConfig({ cfg, onSave, onCancel, onReset }) {
           Salvar
         </Btn>
       </div>
-      {onReset && (
-        <button
-          onClick={() => (confirmReset ? onReset() : setConfirmReset(true))}
-          className="w-full mt-3 py-2.5 rounded-xl font-semibold text-sm"
-          style={{ background: confirmReset ? T.lateSoft : "transparent", color: T.late, border: `1px solid ${confirmReset ? T.late : T.line}` }}>
-          {confirmReset ? "Toque de novo para confirmar — apaga tudo" : "Apagar dados de demonstração / zerar app"}
+      <div className="mt-5 pt-4" style={{ borderTop: `1px solid ${T.line}` }}>
+        <p className="text-xs mb-2" style={{ color: T.inkSoft }}>Conta: {email}</p>
+        <button onClick={onLogout}
+          className="w-full py-2.5 rounded-xl font-semibold text-sm"
+          style={{ background: "transparent", color: T.late, border: `1px solid ${T.line}` }}>
+          Sair da conta
         </button>
-      )}
+      </div>
     </>
   );
 }
