@@ -1160,6 +1160,11 @@ function PixConfig({ cfg, email, onSave, onCancel, onLogout, demo }) {
       </div>
       <div className="mt-5 pt-4" style={{ borderTop: `1px solid ${T.line}` }}>
         <p className="text-xs mb-2" style={{ color: T.inkSoft }}>Conta: {email}</p>
+        <a href="https://emdia-site-8dpe.vercel.app" target="_blank" rel="noopener"
+          className="block w-full py-2.5 rounded-xl font-semibold text-sm text-center mb-2"
+          style={{ background: T.brandSoft, color: T.brand }}>
+          Conheça os planos do EmDia
+        </a>
         <button onClick={onLogout}
           className="w-full py-2.5 rounded-xl font-semibold text-sm"
           style={demo

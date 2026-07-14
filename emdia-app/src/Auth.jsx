@@ -89,6 +89,18 @@ export default function Auth() {
             {modo === "entrar" ? "Não tem conta? Criar grátis" : "Já tem conta? Entrar"}
           </button>
         </div>
+
+        <div className="mt-4 flex items-center justify-center gap-2 text-xs">
+          <a href="/?demo=1" className="font-semibold px-3 py-2 rounded-lg"
+            style={{ background: T.brandSoft, color: T.brand }}>
+            Ver demonstração
+          </a>
+          <a href="https://emdia-site-8dpe.vercel.app" target="_blank" rel="noopener"
+            className="font-semibold px-3 py-2 rounded-lg"
+            style={{ background: T.card, color: T.inkSoft, border: `1px solid ${T.line}` }}>
+            Conheça o EmDia
+          </a>
+        </div>
       </div>
     </div>
   );
