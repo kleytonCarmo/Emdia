@@ -154,15 +154,47 @@ function waCobranca(c, s) {
 }
 
 /* ============================================================ APP */
+/* ---------- dados de demonstração (modo demo, sem login) ---------- */
+const dDemo = (off) => new Date(today.getFullYear(), today.getMonth(), today.getDate() + off).toISOString();
+const demoClients = [
+  { id: "d1", nome: "Ana Beatriz", tipo: "individual", plano: "mensal", ciclo: 1, valor: 450, diaVenc: 5, whatsapp: "5511999990001", ativo: true },
+  { id: "d2", nome: "Carlos Mendes", tipo: "individual", plano: "mensal", ciclo: 1, valor: 380, diaVenc: Math.min(28, today.getDate() + 5), whatsapp: "5511999990002", ativo: true },
+  { id: "d3", nome: "Fernanda Lima", tipo: "individual", plano: "creditos", valorSessao: 90, saldo: 2, whatsapp: "5511999990003", ativo: true },
+  { id: "d4", nome: "João Pedro", tipo: "individual", plano: "creditos", valorSessao: 90, saldo: 8, whatsapp: "5511999990004", ativo: true },
+  { id: "d5", nome: "Mariana Costa", tipo: "individual", plano: "projeto", projetoNome: "Prep. maratona", projetoValor: 3000, whatsapp: "5511999990005", ativo: true },
+  { id: "d6", nome: "Paula & Renato", tipo: "dupla", plano: "mensal", ciclo: 1, valor: 700, diaVenc: today.getDate(), whatsapp: "5511999990006", ativo: true },
+  { id: "d7", nome: "Diego Martins", tipo: "individual", plano: "mensal", ciclo: 6, valor: 2400, diaVenc: 10, cobrancaAuto: true, whatsapp: "5511999990007", ativo: true },
+];
+const demoPayments = [
+  { id: "p1", clientId: "d1", valor: 450, data: dDemo(-3), tipo: "mensalidade", ref: ym, meses: 1 },
+  { id: "p2", clientId: "d4", valor: 900, data: dDemo(-6), tipo: "pacote", creditos: 10 },
+  { id: "p3", clientId: "d5", valor: 1500, data: dDemo(-12), tipo: "projeto" },
+  { id: "p4", clientId: "d7", valor: 2400, data: dDemo(-20), tipo: "mensalidade", ref: ymOf(new Date(today.getFullYear(), today.getMonth() - 1, 1)), meses: 6 },
+];
+const demoSessions = [
+  { id: "s1", clientId: "d4", data: dDemo(-2), tipo: "plano" },
+  { id: "s2", clientId: "d3", data: dDemo(-1), tipo: "plano" },
+  { id: "s3", clientId: "d2", data: dDemo(-4), tipo: "experimental" },
+];
+const demoCfg = { chave: "personal@exemplo.com", nome: "Personal Demo", cidade: "Sao Paulo", descontoAntecipado: 10, linkCartao: "" };
+
+const isDemo = () =>
+  typeof window !== "undefined" &&
+  (new URLSearchParams(window.location.search).has("demo") || window.location.hash === "#demo");
+
 /* ---------- porteiro: mostra login se não estiver autenticado ---------- */
 export default function Root() {
   const [session, setSession] = useState(undefined);
+  const [demo, setDemo] = useState(isDemo());
 
   useEffect(() => {
+    if (demo) return;
     supabase.auth.getSession().then(({ data }) => setSession(data.session));
     const { data: sub } = supabase.auth.onAuthStateChange((_e, s) => setSession(s));
     return () => sub.subscription.unsubscribe();
-  }, []);
+  }, [demo]);
+
+  if (demo) return <App demo onSair={() => { window.history.replaceState({}, "", "/"); setDemo(false); }} />;
 
   if (session === undefined)
     return (
@@ -174,16 +206,17 @@ export default function Root() {
   return <App user={session.user} />;
 }
 
-function App({ user }) {
-  const [clients, setClients] = useState([]);
-  const [payments, setPayments] = useState([]);
-  const [sessions, setSessions] = useState([]);
-  const [pixCfg, setPixCfg] = useState({ chave: "", nome: "", cidade: "", descontoAntecipado: 10, linkCartao: "" });
+function App({ user, demo, onSair }) {
+  const [clients, setClients] = useState(demo ? demoClients : []);
+  const [payments, setPayments] = useState(demo ? demoPayments : []);
+  const [sessions, setSessions] = useState(demo ? demoSessions : []);
+  const [pixCfg, setPixCfg] = useState(demo ? demoCfg : { chave: "", nome: "", cidade: "", descontoAntecipado: 10, linkCartao: "" });
   const [remindersSent, setRemindersSent] = useState({});
-  const [carregando, setCarregando] = useState(true);
+  const [carregando, setCarregando] = useState(!demo);
 
-  /* ---- carrega tudo do banco ---- */
+  /* ---- carrega tudo do banco (não roda no modo demo) ---- */
   useEffect(() => {
+    if (demo || !user) return;
     (async () => {
       const [c, p, s, cfg] = await Promise.all([
         supabase.from("clients").select("*").order("nome"),
@@ -201,7 +234,7 @@ function App({ user }) {
         });
       setCarregando(false);
     })();
-  }, [user.id]);
+  }, [demo, user]);
   const [tab, setTab] = useState("painel");
   const [query, setQuery] = useState("");
   const [histFilter, setHistFilter] = useState("tudo");
@@ -276,8 +309,12 @@ function App({ user }) {
     return `https://wa.me/${c.whatsapp}?text=${encodeURIComponent(msg)}`;
   };
 
-  /* ---- ações (gravam no banco) ---- */
+  /* ---- ações (gravam no banco; no modo demo, só em memória) ---- */
   const addPayment = async (p) => {
+    if (demo) {
+      setPayments((ps) => [...ps, { ...p, id: `p${Date.now()}${Math.random()}` }]);
+      return;
+    }
     const { data, error } = await supabase.from("payments").insert({
       user_id: user.id, client_id: p.clientId, valor: p.valor, data: p.data,
       tipo: p.tipo, ref: p.ref ?? null, meses: p.meses ?? 1, creditos: p.creditos ?? null,
@@ -289,14 +326,19 @@ function App({ user }) {
   const registrarSessao = async (c, tipo, valorAvulsa) => {
     setModal(null);
     const agora = new Date().toISOString();
-    const { data, error } = await supabase.from("sessions")
-      .insert({ user_id: user.id, client_id: c.id, data: agora, tipo }).select().single();
-    if (error) { ping("Erro ao registrar sessão"); return; }
-    setSessions((ss) => [...ss, fromDbSession(data)]);
+
+    if (demo) {
+      setSessions((ss) => [...ss, { id: `s${Date.now()}`, clientId: c.id, data: agora, tipo }]);
+    } else {
+      const { data, error } = await supabase.from("sessions")
+        .insert({ user_id: user.id, client_id: c.id, data: agora, tipo }).select().single();
+      if (error) { ping("Erro ao registrar sessão"); return; }
+      setSessions((ss) => [...ss, fromDbSession(data)]);
+    }
 
     if (tipo === "plano" && c.plano === "creditos") {
       const novo = (c.saldo ?? 0) - 1;
-      await supabase.from("clients").update({ saldo: novo }).eq("id", c.id);
+      if (!demo) await supabase.from("clients").update({ saldo: novo }).eq("id", c.id);
       setClients((cs) => cs.map((x) => (x.id === c.id ? { ...x, saldo: novo } : x)));
       ping(`Sessão registrada · saldo: ${novo}`);
     } else if (tipo === "avulsa") {
@@ -308,12 +350,19 @@ function App({ user }) {
   const saveClient = async (dados, editing) => {
     setModal(null); setSheet(null);
     if (editing) {
-      const { error } = await supabase.from("clients")
-        .update(toDbClient({ ...editing, ...dados }, user.id)).eq("id", editing.id);
-      if (error) { ping("Erro ao salvar"); return; }
+      if (!demo) {
+        const { error } = await supabase.from("clients")
+          .update(toDbClient({ ...editing, ...dados }, user.id)).eq("id", editing.id);
+        if (error) { ping("Erro ao salvar"); return; }
+      }
       setClients((cs) => cs.map((c) => (c.id === editing.id ? { ...c, ...dados } : c)));
       ping("Aluno atualizado");
     } else {
+      if (demo) {
+        setClients((cs) => [...cs, { ...dados, id: `d${Date.now()}`, ativo: true, saldo: 0 }]);
+        ping("Aluno adicionado");
+        return;
+      }
       const { data, error } = await supabase.from("clients")
         .insert(toDbClient({ ...dados, ativo: true, saldo: 0 }, user.id)).select().single();
       if (error) { ping("Erro ao adicionar aluno"); return; }
@@ -324,18 +373,20 @@ function App({ user }) {
 
   const toggleAtivo = async (c) => {
     setSheet(null);
-    await supabase.from("clients").update({ ativo: !c.ativo }).eq("id", c.id);
+    if (!demo) await supabase.from("clients").update({ ativo: !c.ativo }).eq("id", c.id);
     setClients((cs) => cs.map((x) => (x.id === c.id ? { ...x, ativo: !x.ativo } : x)));
     ping(c.ativo ? "Aluno pausado" : "Aluno reativado");
   };
 
   const saveCfg = async (novo) => {
     setModal(null);
-    const { error } = await supabase.from("settings").upsert({
-      user_id: user.id, chave: novo.chave, nome: novo.nome, cidade: novo.cidade,
-      desconto_antecipado: novo.descontoAntecipado, link_cartao: novo.linkCartao,
-    });
-    if (error) { ping("Erro ao salvar"); return; }
+    if (!demo) {
+      const { error } = await supabase.from("settings").upsert({
+        user_id: user.id, chave: novo.chave, nome: novo.nome, cidade: novo.cidade,
+        desconto_antecipado: novo.descontoAntecipado, link_cartao: novo.linkCartao,
+      });
+      if (error) { ping("Erro ao salvar"); return; }
+    }
     setPixCfg(novo);
     ping("Configurações salvas");
   };
@@ -368,6 +419,23 @@ function App({ user }) {
     <div className="min-h-screen flex justify-center" style={{ background: T.bg }}>
       <style>{FONT}</style>
       <div className="w-full max-w-md flex flex-col min-h-screen relative">
+        {demo && (
+          <div className="sticky top-0 z-10 px-4 py-2.5 flex items-center justify-between gap-3"
+            style={{ background: "#14201C" }}>
+            <p className="text-xs font-semibold text-white leading-tight">
+              Modo demonstração · dados fictícios
+              <span className="block font-normal" style={{ color: "#9CC5B0" }}>
+                Mexa à vontade — nada é salvo.
+              </span>
+            </p>
+            <button onClick={onSair}
+              className="text-xs font-bold px-3 py-2 rounded-xl whitespace-nowrap"
+              style={{ background: "#7FD4A8", color: "#0B3A27" }}>
+              Criar minha conta
+            </button>
+          </div>
+        )}
+
         <main className="flex-1 pb-28">
 
           {/* ================= PAINEL ================= */}
@@ -635,8 +703,8 @@ function App({ user }) {
         )}
         {modal?.type === "config" && (
           <Sheet onClose={() => setModal(null)}>
-            <PixConfig cfg={pixCfg} email={user.email} onSave={saveCfg} onCancel={() => setModal(null)}
-              onLogout={() => supabase.auth.signOut()} />
+            <PixConfig cfg={pixCfg} email={demo ? "Modo demonstração" : user.email} onSave={saveCfg} onCancel={() => setModal(null)}
+              onLogout={() => (demo ? onSair() : supabase.auth.signOut())} demo={demo} />
           </Sheet>
         )}
 
@@ -1059,7 +1127,7 @@ function PixForm({ c, cfg, onCopied, onClose }) {
 }
 
 /* ---- configuração PIX ---- */
-function PixConfig({ cfg, email, onSave, onCancel, onLogout }) {
+function PixConfig({ cfg, email, onSave, onCancel, onLogout, demo }) {
   const [chave, setChave] = useState(cfg.chave);
   const [nome, setNome] = useState(cfg.nome);
   const [cidade, setCidade] = useState(cfg.cidade);
@@ -1094,8 +1162,10 @@ function PixConfig({ cfg, email, onSave, onCancel, onLogout }) {
         <p className="text-xs mb-2" style={{ color: T.inkSoft }}>Conta: {email}</p>
         <button onClick={onLogout}
           className="w-full py-2.5 rounded-xl font-semibold text-sm"
-          style={{ background: "transparent", color: T.late, border: `1px solid ${T.line}` }}>
-          Sair da conta
+          style={demo
+            ? { background: T.brand, color: "#fff", border: "none" }
+            : { background: "transparent", color: T.late, border: `1px solid ${T.line}` }}>
+          {demo ? "Criar minha conta grátis" : "Sair da conta"}
         </button>
       </div>
     </>
